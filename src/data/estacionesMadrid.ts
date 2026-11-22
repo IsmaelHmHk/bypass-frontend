@@ -1,3 +1,5 @@
+import { apiFetch } from '../api/apiClient';
+
 export interface SalidaParada {
     linea: string;
     destino: string;
@@ -14,12 +16,28 @@ export interface EstacionCatalogo {
     latitud: number;
     longitud: number;
     accesiblePmr?: boolean;
-    lineas: string[];
+    tieneEnlaceMetro?: boolean;
+    tieneEnlaceBus?: boolean;
+    ordenParada?: number | null;
+    tiempoSiguienteMin?: number | null;
+    lineas?: string[];
     estadoServicio?: string;
     proximasSalidas?: SalidaParada[];
 }
 
-export interface EstacionCercanaLocal extends EstacionCatalogo {
+export interface EstacionCercanaAgrupada {
+    claveNombre: string;
+    nombre: string;
+    idEstacionPrincipal: string;
+    idsEstacion: string[];
+    latitud: number;
+    longitud: number;
+    accesiblePmr: boolean;
+    tieneEnlaceMetro: boolean;
+    tieneEnlaceBus: boolean;
+    lineas: string[];
+    esMetroIdentificado: boolean;
+    modoNoDistinguible: boolean;
     distanciaMetros: number;
     minutosAndando: number;
 }
@@ -30,7 +48,7 @@ export interface LineaGtfsColor {
     colorTextoHex?: string | null;
 }
 
-const STORAGE_CATALOGO = 'bypass_catalogo_estaciones_v2';
+const STORAGE_CATALOGO = 'bypass_catalogo_estaciones_api_v1';
 
 export function leerCatalogoCache(): EstacionCatalogo[] {
     try {
@@ -53,27 +71,24 @@ export function guardarCatalogoCache(estaciones: EstacionCatalogo[]): void {
     }
 }
 
-export async function cargarCatalogoEstaticoPublico(): Promise<EstacionCatalogo[]> {
-    const url = '/estaciones-madrid.json';
-    try {
-        const res = await fetch(url);
-        if (!res.ok) {
-            console.error(`[ByPass] Error cargando fichero estático | URL: ${url} | Código: HTTP ${res.status}`);
-            throw new Error(`HTTP ${res.status}`);
-        }
-        const data = await res.json();
-        if (!Array.isArray(data)) {
-            console.error(`[ByPass] Formato inválido en fichero estático | URL: ${url}`);
-            return [];
-        }
-        return data.map((d) => ({
-            ...d,
-            lineas: Array.isArray(d.lineas) ? d.lineas : [],
-        }));
-    } catch (err) {
-        console.error(`[ByPass] Fallo de red cargando fichero estático | URL: ${url}`, err);
-        throw err;
+export async function obtenerCatalogoDesdeApi(): Promise<EstacionCatalogo[]> {
+    const datos = await apiFetch<EstacionCatalogo[]>('/catalogo/estaciones');
+    if (!Array.isArray(datos)) {
+        return [];
     }
+    return datos.map((item) => ({
+        idEstacion: String(item.idEstacion),
+        codigoParada: item.codigoParada,
+        nombre: String(item.nombre || '').trim(),
+        latitud: Number(item.latitud),
+        longitud: Number(item.longitud),
+        accesiblePmr: Boolean(item.accesiblePmr),
+        tieneEnlaceMetro: Boolean(item.tieneEnlaceMetro),
+        tieneEnlaceBus: Boolean(item.tieneEnlaceBus),
+        lineas: Array.isArray(item.lineas) ? item.lineas : [],
+        estadoServicio: item.estadoServicio,
+        proximasSalidas: Array.isArray(item.proximasSalidas) ? item.proximasSalidas : undefined,
+    }));
 }
 
 export function distanciaHaversineMetros(
@@ -93,24 +108,78 @@ export function distanciaHaversineMetros(
     return Math.round(R * c);
 }
 
-export function calcularCercanasEnCliente(
+export function esIdMetro(idEstacion: string): boolean {
+    return idEstacion.trim().toLowerCase().startsWith('madrid_metro_');
+}
+
+export function calcularCercanasAgrupadas(
     catalogo: EstacionCatalogo[],
     lat: number,
     lon: number,
     limite = 3
-): EstacionCercanaLocal[] {
-    return catalogo
-        .filter((e) => !Number.isNaN(Number(e.latitud)) && !Number.isNaN(Number(e.longitud)))
-        .map((e) => {
-            const distanciaMetros = distanciaHaversineMetros(lat, lon, Number(e.latitud), Number(e.longitud));
-            const minutosAndando = Math.max(1, Math.ceil(distanciaMetros / 80));
-            return {
-                ...e,
-                lineas: Array.isArray(e.lineas) ? e.lineas : [],
+): EstacionCercanaAgrupada[] {
+    const grupos = new Map<string, EstacionCercanaAgrupada>();
+
+    for (const est of catalogo) {
+        if (!est.nombre) continue;
+        const eLat = Number(est.latitud);
+        const eLon = Number(est.longitud);
+        if (Number.isNaN(eLat) || Number.isNaN(eLon)) continue;
+
+        const distanciaMetros = distanciaHaversineMetros(lat, lon, eLat, eLon);
+        const minutosAndando = Math.max(1, Math.ceil(distanciaMetros / 80));
+        const claveNombre = est.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
+        const metroPorId = esIdMetro(est.idEstacion);
+        const metroPorBandera = Boolean(est.tieneEnlaceMetro);
+        const esMetro = metroPorId || metroPorBandera;
+        const lineasItem = Array.isArray(est.lineas) ? est.lineas.filter(Boolean) : [];
+
+        const existente = grupos.get(claveNombre);
+        if (!existente) {
+            grupos.set(claveNombre, {
+                claveNombre,
+                nombre: est.nombre,
+                idEstacionPrincipal: est.idEstacion,
+                idsEstacion: [est.idEstacion],
+                latitud: eLat,
+                longitud: eLon,
+                accesiblePmr: Boolean(est.accesiblePmr),
+                tieneEnlaceMetro: esMetro,
+                tieneEnlaceBus: Boolean(est.tieneEnlaceBus),
+                lineas: [...lineasItem],
+                esMetroIdentificado: esMetro,
+                modoNoDistinguible: !esMetro && lineasItem.length === 0,
                 distanciaMetros,
                 minutosAndando,
-            };
-        })
+            });
+        } else {
+            if (!existente.idsEstacion.includes(est.idEstacion)) {
+                existente.idsEstacion.push(est.idEstacion);
+            }
+            for (const l of lineasItem) {
+                if (!existente.lineas.includes(l)) {
+                    existente.lineas.push(l);
+                }
+            }
+            existente.accesiblePmr = existente.accesiblePmr || Boolean(est.accesiblePmr);
+            existente.tieneEnlaceMetro = existente.tieneEnlaceMetro || esMetro;
+            existente.tieneEnlaceBus = existente.tieneEnlaceBus || Boolean(est.tieneEnlaceBus);
+            existente.esMetroIdentificado = existente.tieneEnlaceMetro;
+
+            if (distanciaMetros < existente.distanciaMetros) {
+                existente.distanciaMetros = distanciaMetros;
+                existente.minutosAndando = minutosAndando;
+                existente.idEstacionPrincipal = est.idEstacion;
+                existente.latitud = eLat;
+                existente.longitud = eLon;
+            }
+
+            existente.modoNoDistinguible =
+                !existente.esMetroIdentificado && existente.lineas.length === 0;
+        }
+    }
+
+    return Array.from(grupos.values())
         .sort((a, b) => a.distanciaMetros - b.distanciaMetros)
         .slice(0, limite);
 }

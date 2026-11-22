@@ -4,14 +4,14 @@ import 'leaflet/dist/leaflet.css';
 import { Search, Navigation, X, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../api/apiClient';
 import {
-    calcularCercanasEnCliente,
-    cargarCatalogoEstaticoPublico,
+    calcularCercanasAgrupadas,
     guardarCatalogoCache,
     leerCatalogoCache,
     normalizarColorGtfs,
     normalizarTextoColorGtfs,
+    obtenerCatalogoDesdeApi,
     type EstacionCatalogo,
-    type EstacionCercanaLocal,
+    type EstacionCercanaAgrupada,
     type LineaGtfsColor,
     type SalidaParada,
 } from '../data/estacionesMadrid';
@@ -77,7 +77,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const [ubicacion, setUbicacion] = useState<{ lat: number; lon: number } | null>(null);
     const [buscandoGps, setBuscandoGps] = useState<boolean>(false);
 
-    const [cargandoCatalogo, setCargandoCatalogo] = useState<boolean>(true);
+    const [cargandoCatalogo, setCargandoCatalogo] = useState<boolean>(() => leerCatalogoCache().length === 0);
     const [errorCatalogo, setErrorCatalogo] = useState<boolean>(false);
 
     const [consulta, setConsulta] = useState('');
@@ -88,36 +88,21 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const [cargandoSalidas, setCargandoSalidas] = useState<boolean>(false);
     const [errorSalidas, setErrorSalidas] = useState<boolean>(false);
 
-    const cargarDatosCatalogo = async () => {
+    const cargarCatalogoYLineas = async (mostrarCargaSiVacio = true) => {
         setErrorCatalogo(false);
-        setCargandoCatalogo(true);
-
-        let cargado = false;
-
-        try {
-            const estaticas = await cargarCatalogoEstaticoPublico();
-            if (estaticas.length > 0) {
-                setCatalogo(estaticas);
-                guardarCatalogoCache(estaticas);
-                cargado = true;
-            }
-        } catch {
-            // Intentar fallback a API si falla el fichero estático
+        if (mostrarCargaSiVacio && catalogo.length === 0) {
+            setCargandoCatalogo(true);
         }
 
         try {
-            const datosApi = await apiFetch<EstacionCatalogo[]>('/catalogo/estaciones');
-            if (Array.isArray(datosApi) && datosApi.length > 0) {
-                const normalizadas = datosApi.map((d) => ({
-                    ...d,
-                    lineas: Array.isArray(d.lineas) ? d.lineas : [],
-                }));
-                setCatalogo(normalizadas);
-                guardarCatalogoCache(normalizadas);
-                cargado = true;
+            const datosApi = await obtenerCatalogoDesdeApi();
+            if (datosApi.length > 0) {
+                setCatalogo(datosApi);
+                guardarCatalogoCache(datosApi);
             }
+            setErrorCatalogo(false);
         } catch {
-            if (!cargado && leerCatalogoCache().length === 0) {
+            if (catalogo.length === 0) {
                 setErrorCatalogo(true);
             }
         } finally {
@@ -164,7 +149,9 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     };
 
     useEffect(() => {
-        cargarDatosCatalogo();
+        // Si ya había caché local, se muestra de inmediato y se refresca en segundo plano
+        cargarCatalogoYLineas(leerCatalogoCache().length === 0);
+
         if (navigator.permissions?.query) {
             navigator.permissions
                 .query({ name: 'geolocation' })
@@ -192,19 +179,22 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
         return { backgroundColor: entrada.bg, color: entrada.fg };
     };
 
-    const cercanas: EstacionCercanaLocal[] = useMemo(() => {
+    const cercanasAgrupadas: EstacionCercanaAgrupada[] = useMemo(() => {
         if (estadoUbicacion !== 'CONCEDIDO' || !ubicacion) return [];
-        return calcularCercanasEnCliente(catalogo, ubicacion.lat, ubicacion.lon, 3);
+        return calcularCercanasAgrupadas(catalogo, ubicacion.lat, ubicacion.lon, 3);
     }, [catalogo, ubicacion, estadoUbicacion]);
 
-    const paradaMasCercana: EstacionCercanaLocal | null = cercanas[0] || null;
+    const paradaMasCercana: EstacionCercanaAgrupada | null = cercanasAgrupadas[0] || null;
 
-    const consultarSalidasDeParada = (idEstacion: string) => {
+    const consultarSalidasDeParada = (idsEstacion: string[]) => {
+        const idPrincipal = idsEstacion[0];
+        if (!idPrincipal) return;
+
         setCargandoSalidas(true);
         setErrorSalidas(false);
 
         apiFetch<{ proximasSalidas?: SalidaParada[] }>(
-            `/catalogo/estaciones/${encodeURIComponent(idEstacion)}/detalle`
+            `/catalogo/estaciones/${encodeURIComponent(idPrincipal)}/detalle`
         )
             .then((detalle) => {
                 const salidas = Array.isArray(detalle?.proximasSalidas) ? detalle.proximasSalidas : [];
@@ -220,13 +210,13 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     };
 
     useEffect(() => {
-        if (!paradaMasCercana?.idEstacion) {
+        if (!paradaMasCercana) {
             setSalidasParada([]);
             setErrorSalidas(false);
             return;
         }
-        consultarSalidasDeParada(paradaMasCercana.idEstacion);
-    }, [paradaMasCercana?.idEstacion]);
+        consultarSalidasDeParada(paradaMasCercana.idsEstacion);
+    }, [paradaMasCercana?.claveNombre]);
 
     const mostrarMapa = estadoUbicacion === 'CONCEDIDO' || estadoUbicacion === 'RECHAZADO';
 
@@ -267,15 +257,16 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             }
 
             const bounds = map.getBounds();
-            const idMasCercana = paradaMasCercana?.idEstacion;
+            const claveMasCercana = paradaMasCercana?.claveNombre;
 
-            catalogo.forEach((est) => {
+            for (const est of catalogo) {
                 const lat = Number(est.latitud);
                 const lon = Number(est.longitud);
-                if (Number.isNaN(lat) || Number.isNaN(lon)) return;
-                if (!bounds.contains([lat, lon])) return;
+                if (Number.isNaN(lat) || Number.isNaN(lon)) continue;
+                if (!bounds.contains([lat, lon])) continue;
 
-                const esCercana = est.idEstacion === idMasCercana;
+                const clave = est.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
+                const esCercana = Boolean(claveMasCercana && clave === claveMasCercana);
                 const primeraLinea = (est.lineas || [])[0] || '';
                 const colorLinea = estiloChipLinea(primeraLinea).backgroundColor;
 
@@ -289,7 +280,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         setConsulta(est.nombre);
                     })
                     .addTo(group);
-            });
+            }
         };
 
         renderizarSoloVisibles();
@@ -300,7 +291,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             map.off('moveend', renderizarSoloVisibles);
             map.off('zoomend', renderizarSoloVisibles);
         };
-    }, [mostrarMapa, estadoUbicacion, ubicacion, catalogo, paradaMasCercana?.idEstacion, coloresLineas]);
+    }, [mostrarMapa, estadoUbicacion, ubicacion, catalogo, paradaMasCercana?.claveNombre, coloresLineas]);
 
     useEffect(() => {
         if (visible && mapInstanceRef.current) {
@@ -311,14 +302,21 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const sugerencias = useMemo(() => {
         const q = consulta.trim().toLowerCase();
         if (!q) return [];
-        return catalogo
-            .filter(
-                (e) =>
-                    e.nombre.toLowerCase().includes(q) ||
-                    (e.codigoParada || '').toLowerCase().includes(q) ||
-                    (e.lineas || []).some((l) => l.toLowerCase().includes(q))
-            )
-            .slice(0, 7);
+        const vistos = new Set<string>();
+        const filtradas: EstacionCatalogo[] = [];
+
+        for (const e of catalogo) {
+            const clave = e.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
+            if (vistos.has(clave)) continue;
+            const coincideNombre = e.nombre.toLowerCase().includes(q);
+            const coincideLinea = (e.lineas || []).some((l) => l.toLowerCase().includes(q));
+            if (coincideNombre || coincideLinea) {
+                vistos.add(clave);
+                filtradas.push(e);
+            }
+            if (filtradas.length >= 7) break;
+        }
+        return filtradas;
     }, [consulta, catalogo]);
 
     const elegirEstacion = (est: EstacionCatalogo) => {
@@ -452,7 +450,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         <button
                             type="button"
                             className="btn-ir-parada"
-                            onClick={cargarDatosCatalogo}
+                            onClick={() => cargarCatalogoYLineas(true)}
                         >
                             <RotateCcw size={14} style={{ verticalAlign: '-2px', marginRight: '0.35rem' }} />
                             Reintentar
@@ -474,7 +472,12 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                             <div>
                                 <h2 className="parada-nombre">{paradaMasCercana.nombre}</h2>
                                 <div className="parada-sub">
-                                    {paradaMasCercana.codigoParada ? `Parada ${paradaMasCercana.codigoParada}` : 'Estación'}
+                                    {paradaMasCercana.esMetroIdentificado
+                                        ? 'Metro'
+                                        : paradaMasCercana.modoNoDistinguible
+                                            ? 'Tipo de transporte no distinguible en los datos'
+                                            : 'Estación'}
+                                    {paradaMasCercana.tieneEnlaceBus ? ' · Enlace bus' : ''}
                                 </div>
                             </div>
                             <span className="parada-distancia">
@@ -483,7 +486,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         </div>
 
                         <div className="lineas-lista">
-                            {(paradaMasCercana.lineas || []).map((linea) => (
+                            {paradaMasCercana.lineas.map((linea) => (
                                 <span
                                     key={linea}
                                     className="linea-chip-oficial"
@@ -503,7 +506,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                                     <button
                                         type="button"
                                         className="btn-secundario-tarjeta"
-                                        onClick={() => consultarSalidasDeParada(paradaMasCercana.idEstacion)}
+                                        onClick={() => consultarSalidasDeParada(paradaMasCercana.idsEstacion)}
                                     >
                                         Reintentar
                                     </button>
@@ -545,7 +548,9 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                             <button
                                 type="button"
                                 className="btn-ir-parada"
-                                onClick={() => onSeleccionarDestino(destinoElegidoId || paradaMasCercana.idEstacion)}
+                                onClick={() =>
+                                    onSeleccionarDestino(destinoElegidoId || paradaMasCercana.idEstacionPrincipal)
+                                }
                             >
                                 Ir hasta esta parada
                             </button>
