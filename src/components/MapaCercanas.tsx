@@ -5,14 +5,19 @@ import { Search, Navigation, X, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../api/apiClient';
 import {
     calcularCercanasAgrupadas,
+    esIdCercanias,
+    esIdMetro,
+    formatearModosEstacion,
     guardarCatalogoCache,
+    guardarLineasCache,
+    indexarColoresPorCodigoCorto,
     leerCatalogoCache,
-    normalizarColorGtfs,
-    normalizarTextoColorGtfs,
+    leerLineasCache,
     obtenerCatalogoDesdeApi,
+    obtenerEstiloChipLinea,
     type EstacionCatalogo,
     type EstacionCercanaAgrupada,
-    type LineaGtfsColor,
+    type LineaCatalogoDto,
     type SalidaParada,
 } from '../data/estacionesMadrid';
 
@@ -23,42 +28,54 @@ interface Props {
 
 type EstadoUbicacion = 'PENDIENTE_PERMISO' | 'CONCEDIDO' | 'RECHAZADO';
 
+interface UbicacionActual {
+    lat: number;
+    lon: number;
+    accuracy: number;
+}
+
 const MADRID_CENTRO: { lat: number; lon: number } = {
     lat: 40.4168,
     lon: -3.7038,
 };
 
-function marcadorEstacion(esMasCercana: boolean, colorPrincipal: string) {
-    const size = esMasCercana ? 16 : 9;
+function colorNeutroModo(idEstacion: string): string {
+    if (esIdMetro(idEstacion)) return '#3B5998';
+    if (esIdCercanias(idEstacion)) return '#8A3B52';
+    return '#6E6A63';
+}
+
+function marcadorEstacion(esMasCercana: boolean, colorMarcador: string) {
+    const size = esMasCercana ? 16 : 10;
     const border = esMasCercana ? '2.5px solid #242424' : '1.5px solid #FAF8F4';
     const outline = esMasCercana ? '2px solid #FAF8F4' : 'none';
-    const bg = esMasCercana ? colorPrincipal : '#77736D';
 
     return L.divIcon({
         className: '',
         html: `<div style="
             width:${size}px;
             height:${size}px;
-            background:${bg};
+            background:${colorMarcador};
             border:${border};
             outline:${outline};
             border-radius:50%;
-            opacity:${esMasCercana ? '1' : '0.72'};
+            opacity:${esMasCercana ? '1' : '0.82'};
         "></div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
     });
 }
 
-function marcadorUbicacion() {
+function marcadorUbicacionAzul() {
     return L.divIcon({
         className: '',
         html: `<div style="
             width:14px;
             height:14px;
-            background:#242424;
-            border:2.5px solid #F4F0E8;
+            background:#2563EB;
+            border:2.5px solid #FFFFFF;
             border-radius:50%;
+            box-shadow:0 0 0 1px #1D4ED8;
         "></div>`,
         iconSize: [14, 14],
         iconAnchor: [7, 7],
@@ -69,12 +86,15 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const mapDivRef = useRef<HTMLDivElement | null>(null);
     const mapInstanceRef = useRef<L.Map | null>(null);
     const markersGroupRef = useRef<L.LayerGroup | null>(null);
+    const watchIdRef = useRef<number | null>(null);
 
     const [catalogo, setCatalogo] = useState<EstacionCatalogo[]>(() => leerCatalogoCache());
-    const [coloresLineas, setColoresLineas] = useState<Record<string, { bg: string; fg: string }>>({});
+    const [coloresPorCodigo, setColoresPorCodigo] = useState<Record<string, string>>(() =>
+        indexarColoresPorCodigoCorto(leerLineasCache())
+    );
 
     const [estadoUbicacion, setEstadoUbicacion] = useState<EstadoUbicacion>('PENDIENTE_PERMISO');
-    const [ubicacion, setUbicacion] = useState<{ lat: number; lon: number } | null>(null);
+    const [ubicacion, setUbicacion] = useState<UbicacionActual | null>(null);
     const [buscandoGps, setBuscandoGps] = useState<boolean>(false);
 
     const [cargandoCatalogo, setCargandoCatalogo] = useState<boolean>(() => leerCatalogoCache().length === 0);
@@ -87,6 +107,49 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const [salidasParada, setSalidasParada] = useState<SalidaParada[]>([]);
     const [cargandoSalidas, setCargandoSalidas] = useState<boolean>(false);
     const [errorSalidas, setErrorSalidas] = useState<boolean>(false);
+
+    const detenerWatch = () => {
+        if (watchIdRef.current !== null && navigator.geolocation) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+            watchIdRef.current = null;
+        }
+    };
+
+    const iniciarWatchUbicacion = () => {
+        if (!navigator.geolocation) {
+            setUbicacion(null);
+            setEstadoUbicacion('RECHAZADO');
+            setBuscandoGps(false);
+            return;
+        }
+
+        detenerWatch();
+        setBuscandoGps(true);
+
+        const id = navigator.geolocation.watchPosition(
+            (pos) => {
+                setUbicacion({
+                    lat: pos.coords.latitude,
+                    lon: pos.coords.longitude,
+                    accuracy: Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 0,
+                });
+                setEstadoUbicacion('CONCEDIDO');
+                setBuscandoGps(false);
+            },
+            () => {
+                setUbicacion(null);
+                setEstadoUbicacion('RECHAZADO');
+                setBuscandoGps(false);
+            },
+            {
+                enableHighAccuracy: true,
+                maximumAge: 5000,
+                timeout: 15000,
+            }
+        );
+
+        watchIdRef.current = id;
+    };
 
     const cargarCatalogoYLineas = async (mostrarCargaSiVacio = true) => {
         setErrorCatalogo(false);
@@ -109,47 +172,16 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             setCargandoCatalogo(false);
         }
 
-        apiFetch<LineaGtfsColor[]>('/catalogo/lineas')
+        apiFetch<LineaCatalogoDto[]>('/catalogo/lineas')
             .then((lineasApi) => {
                 if (!Array.isArray(lineasApi)) return;
-                const mapa: Record<string, { bg: string; fg: string }> = {};
-                for (const l of lineasApi) {
-                    const codigo = (l.codigoCorto || '').trim().toUpperCase();
-                    if (!codigo) continue;
-                    const bg = normalizarColorGtfs(l.colorHex);
-                    const fg = normalizarTextoColorGtfs(l.colorTextoHex, bg);
-                    mapa[codigo] = { bg, fg };
-                }
-                setColoresLineas(mapa);
+                guardarLineasCache(lineasApi);
+                setColoresPorCodigo(indexarColoresPorCodigoCorto(lineasApi));
             })
             .catch(() => {});
     };
 
-    const solicitarGps = () => {
-        if (!navigator.geolocation) {
-            setUbicacion(null);
-            setEstadoUbicacion('RECHAZADO');
-            return;
-        }
-
-        setBuscandoGps(true);
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                setUbicacion({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-                setEstadoUbicacion('CONCEDIDO');
-                setBuscandoGps(false);
-            },
-            () => {
-                setUbicacion(null);
-                setEstadoUbicacion('RECHAZADO');
-                setBuscandoGps(false);
-            },
-            { enableHighAccuracy: true, timeout: 8000 }
-        );
-    };
-
     useEffect(() => {
-        // Si ya había caché local, se muestra de inmediato y se refresca en segundo plano
         cargarCatalogoYLineas(leerCatalogoCache().length === 0);
 
         if (navigator.permissions?.query) {
@@ -157,7 +189,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                 .query({ name: 'geolocation' })
                 .then((perm) => {
                     if (perm.state === 'granted') {
-                        solicitarGps();
+                        iniciarWatchUbicacion();
                     } else if (perm.state === 'denied') {
                         setEstadoUbicacion('RECHAZADO');
                     } else {
@@ -168,15 +200,21 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                     setEstadoUbicacion('PENDIENTE_PERMISO');
                 });
         }
+
+        return () => {
+            detenerWatch();
+        };
     }, []);
 
-    const estiloChipLinea = (codigoLinea: string) => {
-        const key = codigoLinea.trim().toUpperCase();
-        const entrada = coloresLineas[key];
-        if (!entrada) {
-            return { backgroundColor: '#6E6A63', color: '#FFFFFF' };
+    const colorMarcadorEstacion = (est: EstacionCatalogo): string => {
+        const lineaPrincipal = (est.lineas || [])[0];
+        if (lineaPrincipal) {
+            const code = lineaPrincipal.trim().toUpperCase();
+            if (coloresPorCodigo[code]) {
+                return coloresPorCodigo[code];
+            }
         }
-        return { backgroundColor: entrada.bg, color: entrada.fg };
+        return colorNeutroModo(est.idEstacion);
     };
 
     const cercanasAgrupadas: EstacionCercanaAgrupada[] = useMemo(() => {
@@ -185,6 +223,9 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     }, [catalogo, ubicacion, estadoUbicacion]);
 
     const paradaMasCercana: EstacionCercanaAgrupada | null = cercanasAgrupadas[0] || null;
+
+    const ubicacionPocoPrecisa =
+        estadoUbicacion === 'CONCEDIDO' && ubicacion !== null && ubicacion.accuracy > 500;
 
     const consultarSalidasDeParada = (idsEstacion: string[]) => {
         const idPrincipal = idsEstacion[0];
@@ -253,7 +294,19 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             group.clearLayers();
 
             if (estadoUbicacion === 'CONCEDIDO' && ubicacion) {
-                L.marker([ubicacion.lat, ubicacion.lon], { icon: marcadorUbicacion() }).addTo(group);
+                if (ubicacion.accuracy > 0) {
+                    L.circle([ubicacion.lat, ubicacion.lon], {
+                        radius: ubicacion.accuracy,
+                        color: '#2563EB',
+                        weight: 1.5,
+                        fillColor: '#3B82F6',
+                        fillOpacity: 0.14,
+                    }).addTo(group);
+                }
+                L.marker([ubicacion.lat, ubicacion.lon], {
+                    icon: marcadorUbicacionAzul(),
+                    zIndexOffset: 700,
+                }).addTo(group);
             }
 
             const bounds = map.getBounds();
@@ -267,11 +320,9 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
 
                 const clave = est.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
                 const esCercana = Boolean(claveMasCercana && clave === claveMasCercana);
-                const primeraLinea = (est.lineas || [])[0] || '';
-                const colorLinea = estiloChipLinea(primeraLinea).backgroundColor;
 
                 L.marker([lat, lon], {
-                    icon: marcadorEstacion(esCercana, colorLinea),
+                    icon: marcadorEstacion(esCercana, colorMarcadorEstacion(est)),
                     zIndexOffset: esCercana ? 500 : 0,
                 })
                     .bindTooltip(est.nombre, { direction: 'top' })
@@ -291,7 +342,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             map.off('moveend', renderizarSoloVisibles);
             map.off('zoomend', renderizarSoloVisibles);
         };
-    }, [mostrarMapa, estadoUbicacion, ubicacion, catalogo, paradaMasCercana?.claveNombre, coloresLineas]);
+    }, [mostrarMapa, estadoUbicacion, ubicacion, catalogo, paradaMasCercana?.claveNombre, coloresPorCodigo]);
 
     useEffect(() => {
         if (visible && mapInstanceRef.current) {
@@ -309,7 +360,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             const clave = e.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
             if (vistos.has(clave)) continue;
             const coincideNombre = e.nombre.toLowerCase().includes(q);
-            const coincideLinea = (e.lineas || []).some((l) => l.toLowerCase().includes(q));
+            const coincideLinea = (e.lineas || []).some((l: string) => l.toLowerCase().includes(q));
             if (coincideNombre || coincideLinea) {
                 vistos.add(clave);
                 filtradas.push(e);
@@ -339,7 +390,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                     <button
                         type="button"
                         className="btn-ir-parada"
-                        onClick={solicitarGps}
+                        onClick={iniciarWatchUbicacion}
                         disabled={buscandoGps}
                     >
                         {buscandoGps ? 'Buscando paradas cercanas…' : 'Activar ubicación'}
@@ -386,7 +437,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                     <button
                         type="button"
                         className="btn-gps"
-                        onClick={solicitarGps}
+                        onClick={iniciarWatchUbicacion}
                         disabled={buscandoGps}
                     >
                         <Navigation size={13} />
@@ -410,11 +461,11 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                                     >
                                         <span>{est.nombre}</span>
                                         <span className="lineas-lista" style={{ margin: 0 }}>
-                                            {(est.lineas || []).map((l) => (
+                                            {(est.lineas || []).map((l: string) => (
                                                 <span
                                                     key={l}
                                                     className="linea-chip-oficial"
-                                                    style={estiloChipLinea(l)}
+                                                    style={obtenerEstiloChipLinea(l, coloresPorCodigo)}
                                                 >
                                                     {l}
                                                 </span>
@@ -433,6 +484,11 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                 {estadoUbicacion === 'RECHAZADO' && (
                     <div className="estado-gps-linea">
                         <span>Sin ubicación. Busca una estación en el buscador</span>
+                    </div>
+                )}
+                {ubicacionPocoPrecisa && (
+                    <div className="estado-gps-linea">
+                        <span className="aviso-incidencia">Ubicación poco precisa</span>
                     </div>
                 )}
             </div>
@@ -472,12 +528,11 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                             <div>
                                 <h2 className="parada-nombre">{paradaMasCercana.nombre}</h2>
                                 <div className="parada-sub">
-                                    {paradaMasCercana.esMetroIdentificado
-                                        ? 'Metro'
-                                        : paradaMasCercana.modoNoDistinguible
-                                            ? 'Tipo de transporte no distinguible en los datos'
-                                            : 'Estación'}
-                                    {paradaMasCercana.tieneEnlaceBus ? ' · Enlace bus' : ''}
+                                    {formatearModosEstacion(
+                                        paradaMasCercana.idsEstacion,
+                                        paradaMasCercana.tieneEnlaceMetro
+                                    )}
+                                    {paradaMasCercana.tieneEnlaceBus ? ' · Bus' : ''}
                                 </div>
                             </div>
                             <span className="parada-distancia">
@@ -486,11 +541,11 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         </div>
 
                         <div className="lineas-lista">
-                            {paradaMasCercana.lineas.map((linea) => (
+                            {paradaMasCercana.lineas.map((linea: string) => (
                                 <span
                                     key={linea}
                                     className="linea-chip-oficial"
-                                    style={estiloChipLinea(linea)}
+                                    style={obtenerEstiloChipLinea(linea, coloresPorCodigo)}
                                 >
                                     {linea}
                                 </span>
@@ -517,7 +572,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                                         <span className="salida-izquierda">
                                             <span
                                                 className="linea-chip-oficial"
-                                                style={estiloChipLinea(s.linea)}
+                                                style={obtenerEstiloChipLinea(s.linea, coloresPorCodigo)}
                                             >
                                                 {s.linea}
                                             </span>

@@ -4,14 +4,16 @@ import { apiFetch } from './api/apiClient';
 import type { Linea, ReporteIncidencia } from './types/bypass';
 import { useAuth } from './context/AuthContext';
 import { MapaCercanas } from './components/MapaCercanas';
-import {
-    normalizarColorGtfs,
-    normalizarTextoColorGtfs,
-    leerCatalogoCache,
-    type EstacionCatalogo,
-} from './data/estacionesMadrid';
 import { BuscadorRutas } from './components/BuscadorRutas';
 import { TermometroVagones } from './components/TermometroVagones';
+import {
+    guardarLineasCache,
+    indexarColoresPorCodigoCorto,
+    leerCatalogoCache,
+    leerLineasCache,
+    obtenerEstiloChipLinea,
+    type EstacionCatalogo,
+} from './data/estacionesMadrid';
 
 type PestanaMovil = 'MAPA' | 'LO_DE_SIEMPRE' | 'AVISOS';
 
@@ -19,7 +21,10 @@ export default function App() {
     const { usuario } = useAuth();
     const [pestana, setPestana] = useState<PestanaMovil>('MAPA');
     const [estaciones, setEstaciones] = useState<EstacionCatalogo[]>(() => leerCatalogoCache());
-    const [lineas, setLineas] = useState<Linea[]>([]);
+    const [lineas, setLineas] = useState<Linea[]>(() => leerLineasCache() as Linea[]);
+    const [coloresPorCodigo, setColoresPorCodigo] = useState<Record<string, string>>(() =>
+        indexarColoresPorCodigoCorto(leerLineasCache())
+    );
     const [lineaActiva, setLineaActiva] = useState<string>('');
     const [incidencias, setIncidencias] = useState<ReporteIncidencia[]>([]);
     const [destinoSeleccionado, setDestinoSeleccionado] = useState<string>('');
@@ -38,6 +43,8 @@ export default function App() {
             .then((data) => {
                 if (Array.isArray(data) && data.length > 0) {
                     setLineas(data);
+                    guardarLineasCache(data);
+                    setColoresPorCodigo(indexarColoresPorCodigoCorto(data));
                     setLineaActiva((prev) => prev || data[0].idLinea);
                 }
             })
@@ -65,7 +72,7 @@ export default function App() {
         latitud: e.latitud,
         longitud: e.longitud,
         accesiblePmr: e.accesiblePmr,
-        tieneEnlaceMetro: (e.lineas || []).some((l) => /^L\d+/i.test(l)),
+        tieneEnlaceMetro: (e.lineas || []).some((l: string) => /^L\d+/i.test(l)),
         tieneEnlaceBus: false,
     }));
 
@@ -90,7 +97,7 @@ export default function App() {
 
             {ajustesAbiertos && (
                 <section className="ajustes-box" aria-label="Ajustes de la aplicación">
-                    <span>Caché local de estaciones activa</span>
+                    <span>Caché local de estaciones y líneas activa</span>
                     <span>Las salidas marcadas como Teórico proceden de datos reales programados.</span>
                 </section>
             )}
@@ -119,17 +126,20 @@ export default function App() {
                             <div className="lineas-selector">
                                 {lineas.map((l) => {
                                     const activa = lineaActiva === l.idLinea;
-                                    const bg = normalizarColorGtfs(l.colorHex);
-                                    const fg = normalizarTextoColorGtfs(undefined, bg);
+                                    const estiloBase = obtenerEstiloChipLinea(
+                                        l.codigoCorto,
+                                        coloresPorCodigo
+                                    );
                                     return (
                                         <button
                                             key={l.idLinea}
                                             type="button"
                                             className="linea-btn"
                                             style={{
-                                                backgroundColor: activa ? bg : '#FAF8F4',
-                                                color: activa ? fg : '#242424',
-                                                borderColor: bg,
+                                                backgroundColor: activa ? estiloBase.backgroundColor : '#FAF8F4',
+                                                color: activa ? estiloBase.color : '#242424',
+                                                borderColor: estiloBase.backgroundColor,
+                                                border: estiloBase.border || `1px solid ${estiloBase.backgroundColor}`,
                                             }}
                                             onClick={() => setLineaActiva(l.idLinea)}
                                         >

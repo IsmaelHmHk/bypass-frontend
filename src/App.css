@@ -222,10 +222,6 @@ body {
   z-index: 1;
 }
 
-/* Filtro gris claro sobre tiles estándar de OpenStreetMap */
-.leaflet-recuadro .leaflet-tile-pane {
-  filter: grayscale(1) contrast(0.9) brightness(1.05);
-}
 
 .estado-gps-linea {
   margin-top: 0.35rem;

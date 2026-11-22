@@ -36,19 +36,28 @@ export interface EstacionCercanaAgrupada {
     tieneEnlaceMetro: boolean;
     tieneEnlaceBus: boolean;
     lineas: string[];
-    esMetroIdentificado: boolean;
-    modoNoDistinguible: boolean;
     distanciaMetros: number;
     minutosAndando: number;
 }
 
-export interface LineaGtfsColor {
+export interface LineaCatalogoDto {
+    idLinea: string;
     codigoCorto: string;
+    nombreLargo?: string;
     colorHex?: string | null;
     colorTextoHex?: string | null;
 }
 
+export type LineaGtfsColor = LineaCatalogoDto;
+
+export interface EstiloChipLinea {
+    backgroundColor: string;
+    color: string;
+    border?: string;
+}
+
 const STORAGE_CATALOGO = 'bypass_catalogo_estaciones_api_v1';
+const STORAGE_LINEAS = 'bypass_catalogo_lineas_api_v1';
 
 export function leerCatalogoCache(): EstacionCatalogo[] {
     try {
@@ -65,6 +74,27 @@ export function guardarCatalogoCache(estaciones: EstacionCatalogo[]): void {
     try {
         if (Array.isArray(estaciones)) {
             localStorage.setItem(STORAGE_CATALOGO, JSON.stringify(estaciones));
+        }
+    } catch {
+        // Ignorar si localStorage no está disponible
+    }
+}
+
+export function leerLineasCache(): LineaCatalogoDto[] {
+    try {
+        const raw = localStorage.getItem(STORAGE_LINEAS);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+export function guardarLineasCache(lineas: LineaCatalogoDto[]): void {
+    try {
+        if (Array.isArray(lineas)) {
+            localStorage.setItem(STORAGE_LINEAS, JSON.stringify(lineas));
         }
     } catch {
         // Ignorar si localStorage no está disponible
@@ -108,8 +138,36 @@ export function distanciaHaversineMetros(
     return Math.round(R * c);
 }
 
+export type ModoTransporteId = 'METRO' | 'CERCANIAS';
+
 export function esIdMetro(idEstacion: string): boolean {
     return idEstacion.trim().toLowerCase().startsWith('madrid_metro_');
+}
+
+export function esIdCercanias(idEstacion: string): boolean {
+    return idEstacion.trim().toLowerCase().startsWith('madrid_renfe_');
+}
+
+export function detectarModoPorIdEstacion(idEstacion: string): ModoTransporteId | null {
+    if (esIdMetro(idEstacion)) return 'METRO';
+    if (esIdCercanias(idEstacion)) return 'CERCANIAS';
+    return null;
+}
+
+export function formatearModosEstacion(idsEstacion: string[], tieneEnlaceMetro?: boolean): string {
+    const modos = new Set<ModoTransporteId>();
+    for (const id of idsEstacion) {
+        const m = detectarModoPorIdEstacion(id);
+        if (m) modos.add(m);
+    }
+    if (tieneEnlaceMetro) {
+        modos.add('METRO');
+    }
+
+    const etiquetas: string[] = [];
+    if (modos.has('METRO')) etiquetas.push('Metro');
+    if (modos.has('CERCANIAS')) etiquetas.push('Cercanías');
+    return etiquetas.join(' · ');
 }
 
 export function calcularCercanasAgrupadas(
@@ -129,9 +187,7 @@ export function calcularCercanasAgrupadas(
         const distanciaMetros = distanciaHaversineMetros(lat, lon, eLat, eLon);
         const minutosAndando = Math.max(1, Math.ceil(distanciaMetros / 80));
         const claveNombre = est.nombre.toLowerCase().replace(/\s+/g, ' ').trim();
-        const metroPorId = esIdMetro(est.idEstacion);
-        const metroPorBandera = Boolean(est.tieneEnlaceMetro);
-        const esMetro = metroPorId || metroPorBandera;
+        const metro = esIdMetro(est.idEstacion) || Boolean(est.tieneEnlaceMetro);
         const lineasItem = Array.isArray(est.lineas) ? est.lineas.filter(Boolean) : [];
 
         const existente = grupos.get(claveNombre);
@@ -144,11 +200,9 @@ export function calcularCercanasAgrupadas(
                 latitud: eLat,
                 longitud: eLon,
                 accesiblePmr: Boolean(est.accesiblePmr),
-                tieneEnlaceMetro: esMetro,
+                tieneEnlaceMetro: metro,
                 tieneEnlaceBus: Boolean(est.tieneEnlaceBus),
                 lineas: [...lineasItem],
-                esMetroIdentificado: esMetro,
-                modoNoDistinguible: !esMetro && lineasItem.length === 0,
                 distanciaMetros,
                 minutosAndando,
             });
@@ -162,9 +216,8 @@ export function calcularCercanasAgrupadas(
                 }
             }
             existente.accesiblePmr = existente.accesiblePmr || Boolean(est.accesiblePmr);
-            existente.tieneEnlaceMetro = existente.tieneEnlaceMetro || esMetro;
+            existente.tieneEnlaceMetro = existente.tieneEnlaceMetro || metro;
             existente.tieneEnlaceBus = existente.tieneEnlaceBus || Boolean(est.tieneEnlaceBus);
-            existente.esMetroIdentificado = existente.tieneEnlaceMetro;
 
             if (distanciaMetros < existente.distanciaMetros) {
                 existente.distanciaMetros = distanciaMetros;
@@ -173,9 +226,6 @@ export function calcularCercanasAgrupadas(
                 existente.latitud = eLat;
                 existente.longitud = eLon;
             }
-
-            existente.modoNoDistinguible =
-                !existente.esMetroIdentificado && existente.lineas.length === 0;
         }
     }
 
@@ -187,7 +237,14 @@ export function calcularCercanasAgrupadas(
 export function normalizarColorGtfs(raw?: string | null): string {
     if (!raw) return '#6E6A63';
     const limpio = raw.trim().replace(/^#/, '');
-    if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
+    if (/^[0-9A-Fa-f]{3}$/.test(limpio)) {
+        const expandido = limpio
+            .split('')
+            .map((c) => c + c)
+            .join('');
+        return `#${expandido.toUpperCase()}`;
+    }
+    if (/^[0-9A-Fa-f]{6}$/.test(limpio)) {
         return `#${limpio.toUpperCase()}`;
     }
     return '#6E6A63';
@@ -196,17 +253,53 @@ export function normalizarColorGtfs(raw?: string | null): string {
 export function normalizarTextoColorGtfs(raw?: string | null, fondoHex = '#6E6A63'): string {
     if (raw) {
         const limpio = raw.trim().replace(/^#/, '');
-        if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
+        if (/^[0-9A-Fa-f]{3}$/.test(limpio)) {
+            const expandido = limpio
+                .split('')
+                .map((c) => c + c)
+                .join('');
+            return `#${expandido.toUpperCase()}`;
+        }
+        if (/^[0-9A-Fa-f]{6}$/.test(limpio)) {
             return `#${limpio.toUpperCase()}`;
         }
     }
-    const hex = fondoHex.replace('#', '');
-    if (hex.length === 6) {
-        const r = parseInt(hex.slice(0, 2), 16) / 255;
-        const g = parseInt(hex.slice(2, 4), 16) / 255;
-        const b = parseInt(hex.slice(4, 6), 16) / 255;
+    const fondo = normalizarColorGtfs(fondoHex).replace('#', '');
+    if (fondo.length === 6) {
+        const r = parseInt(fondo.slice(0, 2), 16) / 255;
+        const g = parseInt(fondo.slice(2, 4), 16) / 255;
+        const b = parseInt(fondo.slice(4, 6), 16) / 255;
         const luminancia = 0.2126 * r + 0.7152 * g + 0.0722 * b;
         return luminancia > 0.55 ? '#242424' : '#FFFFFF';
     }
     return '#FFFFFF';
+}
+
+export function indexarColoresPorCodigoCorto(
+    lineas: LineaCatalogoDto[]
+): Record<string, string> {
+    const mapa: Record<string, string> = {};
+    for (const l of lineas) {
+        const codigo = (l.codigoCorto || '').trim().toUpperCase();
+        if (!codigo) continue;
+        mapa[codigo] = normalizarColorGtfs(l.colorHex);
+    }
+    return mapa;
+}
+
+export function obtenerEstiloChipLinea(
+    codigoLinea: string,
+    coloresPorCodigo: Record<string, string>,
+    textoOverride?: string | null
+): EstiloChipLinea {
+    const key = codigoLinea.trim().toUpperCase();
+    const bg = coloresPorCodigo[key] || '#6E6A63';
+    const color = normalizarTextoColorGtfs(textoOverride, bg);
+    const esBlanco = bg === '#FFFFFF';
+
+    return {
+        backgroundColor: bg,
+        color,
+        border: esBlanco ? '1px solid #8E8A84' : undefined,
+    };
 }
