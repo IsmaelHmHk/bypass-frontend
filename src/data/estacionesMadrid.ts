@@ -123,3 +123,35 @@ export function calcularCercanasEnCliente(
         .sort((a, b) => a.distanciaMetros - b.distanciaMetros)
         .slice(0, limite);
 }
+export interface LineaGtfsColor {
+    codigoCorto: string;
+    colorHex?: string | null;
+    colorTextoHex?: string | null;
+}
+
+export function normalizarColorGtfs(raw?: string | null): string {
+    if (!raw) return '#6E6A63';
+    const limpio = raw.trim().replace(/^#/, '');
+    if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
+        return `#${limpio.toUpperCase()}`;
+    }
+    return '#6E6A63';
+}
+
+export function normalizarTextoColorGtfs(raw?: string | null, fondoHex = '#6E6A63'): string {
+    if (raw) {
+        const limpio = raw.trim().replace(/^#/, '');
+        if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
+            return `#${limpio.toUpperCase()}`;
+        }
+    }
+    const hex = fondoHex.replace('#', '');
+    if (hex.length === 6) {
+        const r = parseInt(hex.slice(0, 2), 16) / 255;
+        const g = parseInt(hex.slice(2, 4), 16) / 255;
+        const b = parseInt(hex.slice(4, 6), 16) / 255;
+        const luminancia = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        return luminancia > 0.55 ? '#242424' : '#FFFFFF';
+    }
+    return '#FFFFFF';
+}

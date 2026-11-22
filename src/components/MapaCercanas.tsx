@@ -9,96 +9,47 @@ import {
     leerCatalogoCache,
     type EstacionCatalogo,
     type EstacionCercanaLocal,
-    type OpcionRutaApi,
-    type RespuestaRutaApi,
     type SalidaParada,
 } from '../data/estacionesMadrid';
+
+interface LineaCatalogoApi {
+    codigoCorto: string;
+    colorHex?: string | null;
+    colorTextoHex?: string | null;
+}
 
 interface Props {
     onSeleccionarDestino?: (idEstacion: string) => void;
     visible?: boolean;
 }
 
-export function colorLineaOficial(linea: string): string {
-    const code = linea.trim().toUpperCase().replace(/\s+/g, '');
-    switch (code) {
-        case 'C1':
-        case 'C-1':
-            return '#75B7E5';
-        case 'C2':
-        case 'C-2':
-            return '#009A44';
-        case 'C3':
-        case 'C-3':
-            return '#812990';
-        case 'C4':
-        case 'C-4':
-        case 'C4A':
-        case 'C-4A':
-        case 'C4B':
-        case 'C-4B':
-            return '#002D72';
-        case 'C5':
-        case 'C-5':
-            return '#F7B500';
-        case 'C7':
-        case 'C-7':
-            return '#E30613';
-        case 'C8':
-        case 'C-8':
-            return '#5C6670';
-        case 'C10':
-        case 'C-10':
-            return '#84BD00';
-        case 'L1':
-            return '#2DBEF0';
-        case 'L2':
-            return '#ED1C24';
-        case 'L3':
-            return '#FFD200';
-        case 'L4':
-            return '#A65E2E';
-        case 'L5':
-            return '#6CC24A';
-        case 'L6':
-            return '#7C878E';
-        case 'L7':
-            return '#FF7900';
-        case 'L8':
-            return '#EC68A4';
-        case 'L9':
-            return '#A51890';
-        case 'L10':
-            return '#0055A4';
-        case 'L11':
-            return '#00843D';
-        case 'L12':
-            return '#A49900';
-        default:
-            return '#242424';
+const COLOR_SIN_DATO = '#6E6A63';
+
+function normalizarHex(hex?: string | null): string {
+    if (!hex) return COLOR_SIN_DATO;
+    const limpio = hex.trim().replace(/^#/, '');
+    if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
+        return `#${limpio.toUpperCase()}`;
     }
+    return COLOR_SIN_DATO;
 }
 
-function esCercanias(estacion: EstacionCatalogo): boolean {
-    if (estacion.idEstacion.startsWith('madrid_renfe_')) return true;
-    return (estacion.lineas || []).some((l) => /^C-?\d+/i.test(l.trim()));
-}
-
-function marcadorEstacion(estacion: EstacionCatalogo, seleccionada: boolean) {
-    const cercanias = esCercanias(estacion);
-    const color = cercanias ? '#812990' : '#242424';
-    const size = seleccionada ? 14 : 11;
-    const radius = cercanias ? '2px' : '50%';
+function marcadorEstacion(esMasCercana: boolean, colorPrincipal: string) {
+    const size = esMasCercana ? 16 : 9;
+    const border = esMasCercana ? '2.5px solid #242424' : '1.5px solid #FAF8F4';
+    const outline = esMasCercana ? '2px solid #FAF8F4' : 'none';
+    const bg = esMasCercana ? colorPrincipal : '#77736D';
 
     return L.divIcon({
         className: '',
         html: `<div style="
             width:${size}px;
             height:${size}px;
-            background:${color};
-            border:2px solid #FAF8F4;
-            border-radius:${radius};
-            outline:${seleccionada ? '2px solid #242424' : 'none'};
+            background:${bg};
+            border:${border};
+            outline:${outline};
+            border-radius:50%;
+            opacity:${esMasCercana ? '1' : '0.72'};
         "></div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
@@ -120,44 +71,28 @@ function marcadorUbicacion() {
     });
 }
 
-function formatearFuente(fuenteDato?: string): 'EN_VIVO' | 'TEORICO' {
-    if (!fuenteDato) return 'TEORICO';
-    const upper = fuenteDato.toUpperCase();
-    return upper.includes('VIVO') || upper.includes('RT') || upper.includes('DIRECTO')
-        ? 'EN_VIVO'
-        : 'TEORICO';
-}
-
 export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     const mapDivRef = useRef<HTMLDivElement | null>(null);
     const mapInstanceRef = useRef<L.Map | null>(null);
     const markersGroupRef = useRef<L.LayerGroup | null>(null);
-    const mapInitializedRef = useRef<boolean>(false);
 
     const [catalogo, setCatalogo] = useState<EstacionCatalogo[]>(() => leerCatalogoCache());
+    const [coloresLineas, setColoresLineas] = useState<Record<string, { bg: string; fg: string }>>({});
     const [ubicacion, setUbicacion] = useState<{ lat: number; lon: number } | null>(null);
     const [buscandoGps, setBuscandoGps] = useState<boolean>(false);
-    const [sinGpsMensaje, setSinGpsMensaje] = useState<string>(
-        'Activa la ubicación para ver tu parada más cercana'
-    );
 
     const [consulta, setConsulta] = useState('');
     const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
+    const [destinoElegidoId, setDestinoElegidoId] = useState<string | null>(null);
 
     const [salidasParada, setSalidasParada] = useState<SalidaParada[]>([]);
     const [cargandoSalidas, setCargandoSalidas] = useState<boolean>(false);
-
-    const [destinoBuscado, setDestinoBuscado] = useState<EstacionCatalogo | null>(null);
-    const [rutaHaciaDestino, setRutaHaciaDestino] = useState<RespuestaRutaApi | null>(null);
-    const [cargandoRuta, setCargandoRuta] = useState<boolean>(false);
-    const [errorRuta, setErrorRuta] = useState<string | null>(null);
 
     const solicitarGps = () => {
         setBuscandoGps(true);
         if (!navigator.geolocation) {
             setBuscandoGps(false);
             setUbicacion(null);
-            setSinGpsMensaje('Activa la ubicación para ver tu parada más cercana');
             return;
         }
 
@@ -169,7 +104,6 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             () => {
                 setUbicacion(null);
                 setBuscandoGps(false);
-                setSinGpsMensaje('Activa la ubicación para ver tu parada más cercana');
             },
             { enableHighAccuracy: true, timeout: 8000 }
         );
@@ -190,19 +124,44 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                 }
             })
             .catch(() => {});
+
+        apiFetch<LineaCatalogoApi[]>('/catalogo/lineas')
+            .then((lineasApi) => {
+                if (!Array.isArray(lineasApi)) return;
+                const mapa: Record<string, { bg: string; fg: string }> = {};
+                for (const l of lineasApi) {
+                    const codigo = (l.codigoCorto || '').trim().toUpperCase();
+                    if (!codigo) continue;
+                    const bg = normalizarHex(l.colorHex);
+                    const fg = normalizarHex(l.colorTextoHex) !== COLOR_SIN_DATO
+                        ? normalizarHex(l.colorTextoHex)
+                        : '#FFFFFF';
+                    mapa[codigo] = { bg, fg };
+                }
+                setColoresLineas(mapa);
+            })
+            .catch(() => {});
     }, []);
 
-    // Parada más cercana calculada únicamente con ubicación GPS real
+    const estiloChipLinea = (codigoLinea: string) => {
+        const key = codigoLinea.trim().toUpperCase();
+        const entrada = coloresLineas[key];
+        if (!entrada) {
+            return { backgroundColor: COLOR_SIN_DATO, color: '#FFFFFF' };
+        }
+        return { backgroundColor: entrada.bg, color: entrada.fg };
+    };
+
     const cercanas: EstacionCercanaLocal[] = useMemo(() => {
         if (!ubicacion) return [];
         return calcularCercanasEnCliente(catalogo, ubicacion.lat, ubicacion.lon, 3);
     }, [catalogo, ubicacion]);
 
-    const paradaSalida: EstacionCercanaLocal | null = cercanas[0] || null;
+    const paradaMasCercana: EstacionCercanaLocal | null = cercanas[0] || null;
 
-    // Consultar backend solo para horarios y retrasos de la parada de salida más cercana
+    // Consultar salidas reales solo para la parada más cercana
     useEffect(() => {
-        if (!paradaSalida?.idEstacion) {
+        if (!paradaMasCercana?.idEstacion) {
             setSalidasParada([]);
             return;
         }
@@ -211,7 +170,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
         setCargandoSalidas(true);
 
         apiFetch<{ proximasSalidas?: SalidaParada[] }>(
-            `/catalogo/estaciones/${encodeURIComponent(paradaSalida.idEstacion)}/detalle`
+            `/catalogo/estaciones/${encodeURIComponent(paradaMasCercana.idEstacion)}/detalle`
         )
             .then((detalle) => {
                 if (cancelado) return;
@@ -220,9 +179,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             })
             .catch(() => {
                 if (cancelado) return;
-                setSalidasParada(
-                    Array.isArray(paradaSalida.proximasSalidas) ? paradaSalida.proximasSalidas : []
-                );
+                setSalidasParada([]);
             })
             .finally(() => {
                 if (!cancelado) setCargandoSalidas(false);
@@ -231,44 +188,16 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
         return () => {
             cancelado = true;
         };
-    }, [paradaSalida?.idEstacion]);
+    }, [paradaMasCercana?.idEstacion]);
 
-    // Calcular ruta desde parada de salida más cercana hasta el destino elegido
-    const calcularRutaADestino = async (origenId: string, destinoId: string) => {
-        setCargandoRuta(true);
-        setErrorRuta(null);
-        setRutaHaciaDestino(null);
-
-        try {
-            const data = await apiFetch<RespuestaRutaApi>(
-                `/rutas/buscar?origen=${encodeURIComponent(origenId)}&destino=${encodeURIComponent(destinoId)}`
-            );
-            setRutaHaciaDestino(data);
-            if (!data?.rutaRecomendada) {
-                setErrorRuta('No hay ruta disponible con los datos actuales.');
-            }
-        } catch (err) {
-            setErrorRuta(err instanceof Error ? err.message : 'No se pudo consultar la ruta');
-        } finally {
-            setCargandoRuta(false);
-        }
-    };
-
+    // Inicializar y actualizar mapa centrado en la ubicación del usuario con zoom 15
     useEffect(() => {
-        if (destinoBuscado && paradaSalida?.idEstacion) {
-            calcularRutaADestino(paradaSalida.idEstacion, destinoBuscado.idEstacion);
-        } else {
-            setRutaHaciaDestino(null);
-            setErrorRuta(null);
-        }
-    }, [destinoBuscado, paradaSalida?.idEstacion]);
-
-    // Inicializar mapa Leaflet con OpenStreetMap + filtro CSS gris, pintando solo paradas visibles
-    useEffect(() => {
-        if (!mapDivRef.current) return;
+        if (!mapDivRef.current || !ubicacion) return;
 
         if (!mapInstanceRef.current) {
             const map = L.map(mapDivRef.current, {
+                center: [ubicacion.lat, ubicacion.lon],
+                zoom: 15,
                 zoomControl: true,
             });
 
@@ -279,32 +208,21 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
 
             markersGroupRef.current = L.layerGroup().addTo(map);
             mapInstanceRef.current = map;
+        } else {
+            mapInstanceRef.current.setView([ubicacion.lat, ubicacion.lon], 15);
         }
 
         const map = mapInstanceRef.current;
 
-        if (ubicacion && (!mapInitializedRef.current || buscandoGps === false)) {
-            map.setView([ubicacion.lat, ubicacion.lon], 15);
-            mapInitializedRef.current = true;
-        } else if (!mapInitializedRef.current && catalogo.length > 0) {
-            const primera = catalogo[0];
-            if (!Number.isNaN(Number(primera.latitud)) && !Number.isNaN(Number(primera.longitud))) {
-                map.setView([Number(primera.latitud), Number(primera.longitud)], 13);
-                mapInitializedRef.current = true;
-            }
-        }
-
-        const actualizarMarcadoresVisibles = () => {
+        const renderizarSoloVisibles = () => {
             const group = markersGroupRef.current;
             if (!group) return;
             group.clearLayers();
 
-            if (ubicacion) {
-                L.marker([ubicacion.lat, ubicacion.lon], { icon: marcadorUbicacion() }).addTo(group);
-            }
+            L.marker([ubicacion.lat, ubicacion.lon], { icon: marcadorUbicacion() }).addTo(group);
 
-            if (!map.getCenter()) return;
             const bounds = map.getBounds();
+            const idMasCercana = paradaMasCercana?.idEstacion;
 
             catalogo.forEach((est) => {
                 const lat = Number(est.latitud);
@@ -312,31 +230,32 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                 if (Number.isNaN(lat) || Number.isNaN(lon)) return;
                 if (!bounds.contains([lat, lon])) return;
 
-                const marcada =
-                    paradaSalida?.idEstacion === est.idEstacion ||
-                    destinoBuscado?.idEstacion === est.idEstacion;
+                const esCercana = est.idEstacion === idMasCercana;
+                const primeraLinea = (est.lineas || [])[0] || '';
+                const colorLinea = estiloChipLinea(primeraLinea).backgroundColor;
 
                 L.marker([lat, lon], {
-                    icon: marcadorEstacion(est, marcada),
+                    icon: marcadorEstacion(esCercana, colorLinea),
+                    zIndexOffset: esCercana ? 500 : 0,
                 })
                     .bindTooltip(est.nombre, { direction: 'top' })
                     .on('click', () => {
-                        setDestinoBuscado(est);
+                        setDestinoElegidoId(est.idEstacion);
                         setConsulta(est.nombre);
                     })
                     .addTo(group);
             });
         };
 
-        actualizarMarcadoresVisibles();
-        map.on('moveend', actualizarMarcadoresVisibles);
-        map.on('zoomend', actualizarMarcadoresVisibles);
+        renderizarSoloVisibles();
+        map.on('moveend', renderizarSoloVisibles);
+        map.on('zoomend', renderizarSoloVisibles);
 
         return () => {
-            map.off('moveend', actualizarMarcadoresVisibles);
-            map.off('zoomend', actualizarMarcadoresVisibles);
+            map.off('moveend', renderizarSoloVisibles);
+            map.off('zoomend', renderizarSoloVisibles);
         };
-    }, [ubicacion, buscandoGps, catalogo, paradaSalida?.idEstacion, destinoBuscado?.idEstacion]);
+    }, [ubicacion, catalogo, paradaMasCercana?.idEstacion, coloresLineas]);
 
     useEffect(() => {
         if (visible && mapInstanceRef.current) {
@@ -357,103 +276,17 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             .slice(0, 7);
     }, [consulta, catalogo]);
 
-    const elegirDestino = (est: EstacionCatalogo) => {
+    const elegirEstacion = (est: EstacionCatalogo) => {
         setConsulta(est.nombre);
         setMostrarSugerencias(false);
-        setDestinoBuscado(est);
-    };
-
-    const limpiarBusqueda = () => {
-        setConsulta('');
-        setMostrarSugerencias(false);
-        setDestinoBuscado(null);
-        setRutaHaciaDestino(null);
-        setErrorRuta(null);
-    };
-
-    const renderOpcionRuta = (op: OpcionRutaApi, tituloEtiqueta: string) => {
-        const tramosTransporte = (op.tramos || []).filter((t) => t.tipo !== 'TRANSBORDO_PIE');
-        const esDirecto = formatearFuente(tramosTransporte[0]?.fuenteDato) === 'EN_VIVO';
-        const tieneIncidencia = (op.tramos || []).some(
-            (t) => t.estado && t.estado !== 'NORMAL' && t.estado !== 'EN_HORA'
-        );
-
-        return (
-            <div key={op.idRuta} className="ruta-calculada-box">
-                <div className="ruta-cabecera-linea">
-                    <strong>
-                        {tituloEtiqueta} · {op.duracionTotalMin} min
-                    </strong>
-                    <span>
-                        {op.horaSalidaEstimada ? `Sale ${op.horaSalidaEstimada} · ` : ''}
-                        Llega ~{op.horaLlegadaEstimada}
-                    </span>
-                </div>
-
-                <div className="lineas-lista">
-                    <span className="parada-sub">
-                        {op.numTransbordos === 0
-                            ? 'Sin transbordos'
-                            : `${op.numTransbordos} ${op.numTransbordos === 1 ? 'transbordo' : 'transbordos'}`}
-                    </span>
-                    <span className={`etiqueta-fuente ${esDirecto ? 'etiqueta-fuente--directo' : ''}`}>
-                        {esDirecto ? 'En directo' : 'Teórico'}
-                    </span>
-                </div>
-
-                {(op.tramos || []).map((tramo) => (
-                    <div key={tramo.orden} className="tramo-fila">
-                        <div className="salida-izquierda">
-                            {tramo.tipo === 'TRANSBORDO_PIE' ? (
-                                <span>
-                                    <strong>A pie</strong>: {tramo.origen} → {tramo.destino} ({tramo.duracionMin} min)
-                                </span>
-                            ) : (
-                                <>
-                                    <span
-                                        className="linea-chip-oficial"
-                                        style={{ backgroundColor: colorLineaOficial(tramo.linea) }}
-                                    >
-                                        {tramo.linea}
-                                    </span>
-                                    <span>
-                                        {tramo.origen} → {tramo.destino} ({tramo.duracionMin} min
-                                        {tramo.esperaMin > 0 ? `, espera ${tramo.esperaMin} min` : ''})
-                                    </span>
-                                </>
-                            )}
-                        </div>
-                        {tramo.estado && tramo.estado !== 'NORMAL' && tramo.estado !== 'EN_HORA' && (
-                            <span className="aviso-incidencia">{tramo.estado}</span>
-                        )}
-                    </div>
-                ))}
-
-                {op.explicacion && <span className="parada-sub">{op.explicacion}</span>}
-
-                {tieneIncidencia ? (
-                    <span className="aviso-incidencia">Incidencia detectada en el trayecto</span>
-                ) : (
-                    <span className="sin-incidencias">Sin incidencias comunicadas</span>
-                )}
-            </div>
-        );
-    };
-
-    const alternativaMasRapida: OpcionRutaApi | null = useMemo(() => {
-        if (!rutaHaciaDestino?.rutaRecomendada || !Array.isArray(rutaHaciaDestino.alternativas)) {
-            return null;
+        setDestinoElegidoId(est.idEstacion);
+        if (onSeleccionarDestino) {
+            onSeleccionarDestino(est.idEstacion);
         }
-        const principalDur = rutaHaciaDestino.rutaRecomendada.duracionTotalMin;
-        const masRapidas = rutaHaciaDestino.alternativas.filter(
-            (alt) => alt.duracionTotalMin < principalDur
-        );
-        return masRapidas[0] || null;
-    }, [rutaHaciaDestino]);
+    };
 
     return (
         <div>
-            {/* Buscador "¿A dónde vamos?" con botón GPS */}
             <div className="buscador-bloque">
                 <div className="buscador-fila">
                     <Search size={16} aria-hidden="true" />
@@ -477,7 +310,11 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                             type="button"
                             className="btn-icono-limpiar"
                             aria-label="Limpiar búsqueda"
-                            onClick={limpiarBusqueda}
+                            onClick={() => {
+                                setConsulta('');
+                                setMostrarSugerencias(false);
+                                setDestinoElegidoId(null);
+                            }}
                         >
                             <X size={15} />
                         </button>
@@ -505,15 +342,15 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                                     <button
                                         type="button"
                                         className="sugerencia-btn"
-                                        onClick={() => elegirDestino(est)}
+                                        onClick={() => elegirEstacion(est)}
                                     >
                                         <span>{est.nombre}</span>
                                         <span className="lineas-lista" style={{ margin: 0 }}>
-                                            {(est.lineas || []).slice(0, 4).map((l) => (
+                                            {(est.lineas || []).map((l) => (
                                                 <span
                                                     key={l}
                                                     className="linea-chip-oficial"
-                                                    style={{ backgroundColor: colorLineaOficial(l) }}
+                                                    style={estiloChipLinea(l)}
                                                 >
                                                     {l}
                                                 </span>
@@ -527,93 +364,45 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                 )}
             </div>
 
-            {/* Mapa en recuadro de altura fija con OpenStreetMap + filtro gris */}
             <div className="mapa-marco">
-                <div ref={mapDivRef} className="leaflet-recuadro" />
-                <div className="estado-gps-linea">
-                    <span>{ubicacion ? 'Ubicación GPS activa' : sinGpsMensaje}</span>
-                    <span>Cercanías · Metro</span>
-                </div>
+                {ubicacion ? (
+                    <div ref={mapDivRef} className="leaflet-recuadro" />
+                ) : (
+                    <div className="leaflet-recuadro" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+                        <span className="texto-cargando">Activa la ubicación para ver tu parada más cercana</span>
+                    </div>
+                )}
             </div>
 
-            {/* Debajo del mapa: ruta hacia destino buscado O parada más cercana */}
             <div className="parada-cercana-seccion">
-                {destinoBuscado ? (
-                    <article className="parada-tarjeta" aria-label="Ruta hacia el destino">
-                        <div className="parada-cabecera">
-                            <div>
-                                <div className="parada-sub">Destino</div>
-                                <h2 className="parada-nombre">{destinoBuscado.nombre}</h2>
-                            </div>
-                            <button
-                                type="button"
-                                className="btn-secundario-tarjeta"
-                                onClick={limpiarBusqueda}
-                            >
-                                Cerrar
-                            </button>
-                        </div>
-
-                        {!ubicacion || !paradaSalida ? (
-                            <p className="texto-cargando">
-                                Activa la ubicación para calcular cómo llegar desde tu parada más cercana a{' '}
-                                {destinoBuscado.nombre}.
-                            </p>
-                        ) : cargandoRuta ? (
-                            <p className="texto-cargando" role="status">
-                                Calculando ruta desde {paradaSalida.nombre}…
-                            </p>
-                        ) : errorRuta ? (
-                            <p className="texto-cargando">{errorRuta}</p>
-                        ) : rutaHaciaDestino?.rutaRecomendada ? (
-                            <>
-                                <div className="parada-sub">
-                                    Salida desde <strong>{paradaSalida.nombre}</strong> ({paradaSalida.distanciaMetros} m ·
-                                    ~{paradaSalida.minutosAndando} min andando)
-                                </div>
-
-                                {rutaHaciaDestino.hayAlertaBypass && rutaHaciaDestino.mensajeBypass && (
-                                    <div className="aviso-incidencia">{rutaHaciaDestino.mensajeBypass}</div>
-                                )}
-
-                                {renderOpcionRuta(rutaHaciaDestino.rutaRecomendada, 'Ruta recomendada')}
-
-                                {alternativaMasRapida && (
-                                    <div className="alternativa-box">
-                                        {renderOpcionRuta(alternativaMasRapida, 'Alternativa más rápida')}
-                                    </div>
-                                )}
-                            </>
-                        ) : null}
-                    </article>
-                ) : !ubicacion ? (
+                {!ubicacion ? (
                     <article className="parada-tarjeta">
-                        <p className="texto-cargando">{sinGpsMensaje}</p>
+                        <p className="texto-cargando">Activa la ubicación para ver tu parada más cercana</p>
                     </article>
-                ) : buscandoGps && !paradaSalida ? (
+                ) : buscandoGps && !paradaMasCercana ? (
                     <p className="texto-cargando" role="status">
                         Buscando paradas cercanas…
                     </p>
-                ) : paradaSalida ? (
+                ) : paradaMasCercana ? (
                     <article className="parada-tarjeta" aria-label="Parada más cercana">
                         <div className="parada-cabecera">
                             <div>
-                                <h2 className="parada-nombre">{paradaSalida.nombre}</h2>
+                                <h2 className="parada-nombre">{paradaMasCercana.nombre}</h2>
                                 <div className="parada-sub">
-                                    {paradaSalida.codigoParada ? `Parada ${paradaSalida.codigoParada}` : 'Estación'}
+                                    {paradaMasCercana.codigoParada ? `Parada ${paradaMasCercana.codigoParada}` : 'Estación'}
                                 </div>
                             </div>
                             <span className="parada-distancia">
-                                {paradaSalida.distanciaMetros} m · ~{paradaSalida.minutosAndando} min andando
+                                {paradaMasCercana.distanciaMetros} m · ~{paradaMasCercana.minutosAndando} min andando
                             </span>
                         </div>
 
                         <div className="lineas-lista">
-                            {(paradaSalida.lineas || []).map((linea) => (
+                            {(paradaMasCercana.lineas || []).map((linea) => (
                                 <span
                                     key={linea}
                                     className="linea-chip-oficial"
-                                    style={{ backgroundColor: colorLineaOficial(linea) }}
+                                    style={estiloChipLinea(linea)}
                                 >
                                     {linea}
                                 </span>
@@ -622,14 +411,14 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
 
                         <div className="salidas-bloque">
                             {cargandoSalidas ? (
-                                <span className="texto-cargando">Consultando próximas salidas…</span>
+                                <span className="texto-cargando">Buscando paradas cercanas…</span>
                             ) : salidasParada.length > 0 ? (
                                 salidasParada.slice(0, 3).map((s, idx) => (
                                     <div key={`${s.linea}-${idx}`} className="salida-item">
                                         <span className="salida-izquierda">
                                             <span
                                                 className="linea-chip-oficial"
-                                                style={{ backgroundColor: colorLineaOficial(s.linea) }}
+                                                style={estiloChipLinea(s.linea)}
                                             >
                                                 {s.linea}
                                             </span>
@@ -660,14 +449,14 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                             <button
                                 type="button"
                                 className="btn-ir-parada"
-                                onClick={() => onSeleccionarDestino(paradaSalida.idEstacion)}
+                                onClick={() => onSeleccionarDestino(destinoElegidoId || paradaMasCercana.idEstacion)}
                             >
                                 Ir hasta esta parada
                             </button>
                         )}
                     </article>
                 ) : (
-                    <p className="texto-cargando">Activa la ubicación para ver tu parada más cercana</p>
+                    <p className="texto-cargando">Sin horarios disponibles</p>
                 )}
             </div>
         </div>
