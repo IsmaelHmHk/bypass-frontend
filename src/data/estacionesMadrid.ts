@@ -24,42 +24,10 @@ export interface EstacionCercanaLocal extends EstacionCatalogo {
     minutosAndando: number;
 }
 
-export interface TramoRutaApi {
-    orden: number;
-    tipo: string;
-    operador: string;
-    linea: string;
-    origen: string;
-    destino: string;
-    duracionMin: number;
-    esperaMin: number;
-    fuenteDato: string;
-    estado: string;
-    accesiblePmr: boolean;
-    paradasIntermedias?: string[];
-}
-
-export interface OpcionRutaApi {
-    idRuta: string;
-    etiqueta: string;
-    duracionTotalMin: number;
-    horaSalidaEstimada?: string;
-    horaLlegadaEstimada: string;
-    numTransbordos: number;
-    accesiblePmr: boolean;
-    fiabilidad: string;
-    diferenciaMin: number | null;
-    explicacion: string;
-    tramos: TramoRutaApi[];
-}
-
-export interface RespuestaRutaApi {
-    origen: { idEstacion: string; nombre: string };
-    destino: { idEstacion: string; nombre: string };
-    hayAlertaBypass: boolean;
-    mensajeBypass: string | null;
-    rutaRecomendada: OpcionRutaApi | null;
-    alternativas: OpcionRutaApi[];
+export interface LineaGtfsColor {
+    codigoCorto: string;
+    colorHex?: string | null;
+    colorTextoHex?: string | null;
 }
 
 const STORAGE_CATALOGO = 'bypass_catalogo_estaciones_v2';
@@ -82,6 +50,29 @@ export function guardarCatalogoCache(estaciones: EstacionCatalogo[]): void {
         }
     } catch {
         // Ignorar si localStorage no está disponible
+    }
+}
+
+export async function cargarCatalogoEstaticoPublico(): Promise<EstacionCatalogo[]> {
+    const url = '/estaciones-madrid.json';
+    try {
+        const res = await fetch(url);
+        if (!res.ok) {
+            console.error(`[ByPass] Error cargando fichero estático | URL: ${url} | Código: HTTP ${res.status}`);
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (!Array.isArray(data)) {
+            console.error(`[ByPass] Formato inválido en fichero estático | URL: ${url}`);
+            return [];
+        }
+        return data.map((d) => ({
+            ...d,
+            lineas: Array.isArray(d.lineas) ? d.lineas : [],
+        }));
+    } catch (err) {
+        console.error(`[ByPass] Fallo de red cargando fichero estático | URL: ${url}`, err);
+        throw err;
     }
 }
 
@@ -122,11 +113,6 @@ export function calcularCercanasEnCliente(
         })
         .sort((a, b) => a.distanciaMetros - b.distanciaMetros)
         .slice(0, limite);
-}
-export interface LineaGtfsColor {
-    codigoCorto: string;
-    colorHex?: string | null;
-    colorTextoHex?: string | null;
 }
 
 export function normalizarColorGtfs(raw?: string | null): string {

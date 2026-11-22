@@ -1,38 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Search, Navigation, X } from 'lucide-react';
+import { Search, Navigation, X, RotateCcw } from 'lucide-react';
 import { apiFetch } from '../api/apiClient';
 import {
     calcularCercanasEnCliente,
+    cargarCatalogoEstaticoPublico,
     guardarCatalogoCache,
     leerCatalogoCache,
+    normalizarColorGtfs,
+    normalizarTextoColorGtfs,
     type EstacionCatalogo,
     type EstacionCercanaLocal,
+    type LineaGtfsColor,
     type SalidaParada,
 } from '../data/estacionesMadrid';
-
-interface LineaCatalogoApi {
-    codigoCorto: string;
-    colorHex?: string | null;
-    colorTextoHex?: string | null;
-}
 
 interface Props {
     onSeleccionarDestino?: (idEstacion: string) => void;
     visible?: boolean;
 }
 
-const COLOR_SIN_DATO = '#6E6A63';
+type EstadoUbicacion = 'PENDIENTE_PERMISO' | 'CONCEDIDO' | 'RECHAZADO';
 
-function normalizarHex(hex?: string | null): string {
-    if (!hex) return COLOR_SIN_DATO;
-    const limpio = hex.trim().replace(/^#/, '');
-    if (/^[0-9A-Fa-f]{6}$/.test(limpio) || /^[0-9A-Fa-f]{3}$/.test(limpio)) {
-        return `#${limpio.toUpperCase()}`;
-    }
-    return COLOR_SIN_DATO;
-}
+const MADRID_CENTRO: { lat: number; lon: number } = {
+    lat: 40.4168,
+    lon: -3.7038,
+};
 
 function marcadorEstacion(esMasCercana: boolean, colorPrincipal: string) {
     const size = esMasCercana ? 16 : 9;
@@ -78,8 +72,13 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
 
     const [catalogo, setCatalogo] = useState<EstacionCatalogo[]>(() => leerCatalogoCache());
     const [coloresLineas, setColoresLineas] = useState<Record<string, { bg: string; fg: string }>>({});
+
+    const [estadoUbicacion, setEstadoUbicacion] = useState<EstadoUbicacion>('PENDIENTE_PERMISO');
     const [ubicacion, setUbicacion] = useState<{ lat: number; lon: number } | null>(null);
     const [buscandoGps, setBuscandoGps] = useState<boolean>(false);
+
+    const [cargandoCatalogo, setCargandoCatalogo] = useState<boolean>(true);
+    const [errorCatalogo, setErrorCatalogo] = useState<boolean>(false);
 
     const [consulta, setConsulta] = useState('');
     const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
@@ -87,22 +86,77 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
 
     const [salidasParada, setSalidasParada] = useState<SalidaParada[]>([]);
     const [cargandoSalidas, setCargandoSalidas] = useState<boolean>(false);
+    const [errorSalidas, setErrorSalidas] = useState<boolean>(false);
+
+    const cargarDatosCatalogo = async () => {
+        setErrorCatalogo(false);
+        setCargandoCatalogo(true);
+
+        let cargado = false;
+
+        try {
+            const estaticas = await cargarCatalogoEstaticoPublico();
+            if (estaticas.length > 0) {
+                setCatalogo(estaticas);
+                guardarCatalogoCache(estaticas);
+                cargado = true;
+            }
+        } catch {
+            // Intentar fallback a API si falla el fichero estático
+        }
+
+        try {
+            const datosApi = await apiFetch<EstacionCatalogo[]>('/catalogo/estaciones');
+            if (Array.isArray(datosApi) && datosApi.length > 0) {
+                const normalizadas = datosApi.map((d) => ({
+                    ...d,
+                    lineas: Array.isArray(d.lineas) ? d.lineas : [],
+                }));
+                setCatalogo(normalizadas);
+                guardarCatalogoCache(normalizadas);
+                cargado = true;
+            }
+        } catch {
+            if (!cargado && leerCatalogoCache().length === 0) {
+                setErrorCatalogo(true);
+            }
+        } finally {
+            setCargandoCatalogo(false);
+        }
+
+        apiFetch<LineaGtfsColor[]>('/catalogo/lineas')
+            .then((lineasApi) => {
+                if (!Array.isArray(lineasApi)) return;
+                const mapa: Record<string, { bg: string; fg: string }> = {};
+                for (const l of lineasApi) {
+                    const codigo = (l.codigoCorto || '').trim().toUpperCase();
+                    if (!codigo) continue;
+                    const bg = normalizarColorGtfs(l.colorHex);
+                    const fg = normalizarTextoColorGtfs(l.colorTextoHex, bg);
+                    mapa[codigo] = { bg, fg };
+                }
+                setColoresLineas(mapa);
+            })
+            .catch(() => {});
+    };
 
     const solicitarGps = () => {
-        setBuscandoGps(true);
         if (!navigator.geolocation) {
-            setBuscandoGps(false);
             setUbicacion(null);
+            setEstadoUbicacion('RECHAZADO');
             return;
         }
 
+        setBuscandoGps(true);
         navigator.geolocation.getCurrentPosition(
             (pos) => {
                 setUbicacion({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+                setEstadoUbicacion('CONCEDIDO');
                 setBuscandoGps(false);
             },
             () => {
                 setUbicacion(null);
+                setEstadoUbicacion('RECHAZADO');
                 setBuscandoGps(false);
             },
             { enableHighAccuracy: true, timeout: 8000 }
@@ -110,94 +164,83 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
     };
 
     useEffect(() => {
-        solicitarGps();
-
-        apiFetch<EstacionCatalogo[]>('/catalogo/estaciones')
-            .then((datos) => {
-                if (Array.isArray(datos)) {
-                    const normalizadas = datos.map((d) => ({
-                        ...d,
-                        lineas: Array.isArray(d.lineas) ? d.lineas : [],
-                    }));
-                    setCatalogo(normalizadas);
-                    guardarCatalogoCache(normalizadas);
-                }
-            })
-            .catch(() => {});
-
-        apiFetch<LineaCatalogoApi[]>('/catalogo/lineas')
-            .then((lineasApi) => {
-                if (!Array.isArray(lineasApi)) return;
-                const mapa: Record<string, { bg: string; fg: string }> = {};
-                for (const l of lineasApi) {
-                    const codigo = (l.codigoCorto || '').trim().toUpperCase();
-                    if (!codigo) continue;
-                    const bg = normalizarHex(l.colorHex);
-                    const fg = normalizarHex(l.colorTextoHex) !== COLOR_SIN_DATO
-                        ? normalizarHex(l.colorTextoHex)
-                        : '#FFFFFF';
-                    mapa[codigo] = { bg, fg };
-                }
-                setColoresLineas(mapa);
-            })
-            .catch(() => {});
+        cargarDatosCatalogo();
+        if (navigator.permissions?.query) {
+            navigator.permissions
+                .query({ name: 'geolocation' })
+                .then((perm) => {
+                    if (perm.state === 'granted') {
+                        solicitarGps();
+                    } else if (perm.state === 'denied') {
+                        setEstadoUbicacion('RECHAZADO');
+                    } else {
+                        setEstadoUbicacion('PENDIENTE_PERMISO');
+                    }
+                })
+                .catch(() => {
+                    setEstadoUbicacion('PENDIENTE_PERMISO');
+                });
+        }
     }, []);
 
     const estiloChipLinea = (codigoLinea: string) => {
         const key = codigoLinea.trim().toUpperCase();
         const entrada = coloresLineas[key];
         if (!entrada) {
-            return { backgroundColor: COLOR_SIN_DATO, color: '#FFFFFF' };
+            return { backgroundColor: '#6E6A63', color: '#FFFFFF' };
         }
         return { backgroundColor: entrada.bg, color: entrada.fg };
     };
 
     const cercanas: EstacionCercanaLocal[] = useMemo(() => {
-        if (!ubicacion) return [];
+        if (estadoUbicacion !== 'CONCEDIDO' || !ubicacion) return [];
         return calcularCercanasEnCliente(catalogo, ubicacion.lat, ubicacion.lon, 3);
-    }, [catalogo, ubicacion]);
+    }, [catalogo, ubicacion, estadoUbicacion]);
 
     const paradaMasCercana: EstacionCercanaLocal | null = cercanas[0] || null;
 
-    // Consultar salidas reales solo para la parada más cercana
-    useEffect(() => {
-        if (!paradaMasCercana?.idEstacion) {
-            setSalidasParada([]);
-            return;
-        }
-
-        let cancelado = false;
+    const consultarSalidasDeParada = (idEstacion: string) => {
         setCargandoSalidas(true);
+        setErrorSalidas(false);
 
         apiFetch<{ proximasSalidas?: SalidaParada[] }>(
-            `/catalogo/estaciones/${encodeURIComponent(paradaMasCercana.idEstacion)}/detalle`
+            `/catalogo/estaciones/${encodeURIComponent(idEstacion)}/detalle`
         )
             .then((detalle) => {
-                if (cancelado) return;
                 const salidas = Array.isArray(detalle?.proximasSalidas) ? detalle.proximasSalidas : [];
                 setSalidasParada(salidas);
             })
             .catch(() => {
-                if (cancelado) return;
                 setSalidasParada([]);
+                setErrorSalidas(true);
             })
             .finally(() => {
-                if (!cancelado) setCargandoSalidas(false);
+                setCargandoSalidas(false);
             });
+    };
 
-        return () => {
-            cancelado = true;
-        };
+    useEffect(() => {
+        if (!paradaMasCercana?.idEstacion) {
+            setSalidasParada([]);
+            setErrorSalidas(false);
+            return;
+        }
+        consultarSalidasDeParada(paradaMasCercana.idEstacion);
     }, [paradaMasCercana?.idEstacion]);
 
-    // Inicializar y actualizar mapa centrado en la ubicación del usuario con zoom 15
+    const mostrarMapa = estadoUbicacion === 'CONCEDIDO' || estadoUbicacion === 'RECHAZADO';
+
     useEffect(() => {
-        if (!mapDivRef.current || !ubicacion) return;
+        if (!mostrarMapa || !mapDivRef.current) return;
+
+        const centro =
+            estadoUbicacion === 'CONCEDIDO' && ubicacion ? ubicacion : MADRID_CENTRO;
+        const zoom = estadoUbicacion === 'CONCEDIDO' && ubicacion ? 15 : 12;
 
         if (!mapInstanceRef.current) {
             const map = L.map(mapDivRef.current, {
-                center: [ubicacion.lat, ubicacion.lon],
-                zoom: 15,
+                center: [centro.lat, centro.lon],
+                zoom,
                 zoomControl: true,
             });
 
@@ -209,7 +252,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             markersGroupRef.current = L.layerGroup().addTo(map);
             mapInstanceRef.current = map;
         } else {
-            mapInstanceRef.current.setView([ubicacion.lat, ubicacion.lon], 15);
+            mapInstanceRef.current.setView([centro.lat, centro.lon], zoom);
         }
 
         const map = mapInstanceRef.current;
@@ -219,7 +262,9 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             if (!group) return;
             group.clearLayers();
 
-            L.marker([ubicacion.lat, ubicacion.lon], { icon: marcadorUbicacion() }).addTo(group);
+            if (estadoUbicacion === 'CONCEDIDO' && ubicacion) {
+                L.marker([ubicacion.lat, ubicacion.lon], { icon: marcadorUbicacion() }).addTo(group);
+            }
 
             const bounds = map.getBounds();
             const idMasCercana = paradaMasCercana?.idEstacion;
@@ -255,13 +300,13 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             map.off('moveend', renderizarSoloVisibles);
             map.off('zoomend', renderizarSoloVisibles);
         };
-    }, [ubicacion, catalogo, paradaMasCercana?.idEstacion, coloresLineas]);
+    }, [mostrarMapa, estadoUbicacion, ubicacion, catalogo, paradaMasCercana?.idEstacion, coloresLineas]);
 
     useEffect(() => {
         if (visible && mapInstanceRef.current) {
             setTimeout(() => mapInstanceRef.current?.invalidateSize(), 100);
         }
-    }, [visible]);
+    }, [visible, mostrarMapa]);
 
     const sugerencias = useMemo(() => {
         const q = consulta.trim().toLowerCase();
@@ -284,6 +329,27 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             onSeleccionarDestino(est.idEstacion);
         }
     };
+
+    if (estadoUbicacion === 'PENDIENTE_PERMISO') {
+        return (
+            <div className="parada-cercana-seccion">
+                <article className="parada-tarjeta" aria-label="Permiso de ubicación">
+                    <h2 className="parada-nombre">Activa tu ubicación</h2>
+                    <p className="parada-sub" style={{ margin: '0.45rem 0 0.75rem' }}>
+                        ByPass la usa para mostrarte tu parada más cercana. No la guardamos en ningún servidor
+                    </p>
+                    <button
+                        type="button"
+                        className="btn-ir-parada"
+                        onClick={solicitarGps}
+                        disabled={buscandoGps}
+                    >
+                        {buscandoGps ? 'Buscando paradas cercanas…' : 'Activar ubicación'}
+                    </button>
+                </article>
+            </div>
+        );
+    }
 
     return (
         <div>
@@ -365,19 +431,38 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
             </div>
 
             <div className="mapa-marco">
-                {ubicacion ? (
-                    <div ref={mapDivRef} className="leaflet-recuadro" />
-                ) : (
-                    <div className="leaflet-recuadro" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
-                        <span className="texto-cargando">Activa la ubicación para ver tu parada más cercana</span>
+                <div ref={mapDivRef} className="leaflet-recuadro" />
+                {estadoUbicacion === 'RECHAZADO' && (
+                    <div className="estado-gps-linea">
+                        <span>Sin ubicación. Busca una estación en el buscador</span>
                     </div>
                 )}
             </div>
 
             <div className="parada-cercana-seccion">
-                {!ubicacion ? (
+                {cargandoCatalogo && catalogo.length === 0 ? (
+                    <p className="texto-cargando" role="status">
+                        Buscando paradas cercanas…
+                    </p>
+                ) : errorCatalogo && catalogo.length === 0 ? (
                     <article className="parada-tarjeta">
-                        <p className="texto-cargando">Activa la ubicación para ver tu parada más cercana</p>
+                        <p className="texto-cargando" style={{ marginTop: 0 }}>
+                            No pudimos cargar los datos. Reintentar
+                        </p>
+                        <button
+                            type="button"
+                            className="btn-ir-parada"
+                            onClick={cargarDatosCatalogo}
+                        >
+                            <RotateCcw size={14} style={{ verticalAlign: '-2px', marginRight: '0.35rem' }} />
+                            Reintentar
+                        </button>
+                    </article>
+                ) : estadoUbicacion === 'RECHAZADO' ? (
+                    <article className="parada-tarjeta">
+                        <p className="texto-cargando" style={{ margin: 0 }}>
+                            Sin ubicación. Busca una estación en el buscador
+                        </p>
                     </article>
                 ) : buscandoGps && !paradaMasCercana ? (
                     <p className="texto-cargando" role="status">
@@ -412,6 +497,17 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         <div className="salidas-bloque">
                             {cargandoSalidas ? (
                                 <span className="texto-cargando">Buscando paradas cercanas…</span>
+                            ) : errorSalidas ? (
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+                                    <span className="texto-cargando">No pudimos cargar los datos. Reintentar</span>
+                                    <button
+                                        type="button"
+                                        className="btn-secundario-tarjeta"
+                                        onClick={() => consultarSalidasDeParada(paradaMasCercana.idEstacion)}
+                                    >
+                                        Reintentar
+                                    </button>
+                                </div>
                             ) : salidasParada.length > 0 ? (
                                 salidasParada.slice(0, 3).map((s, idx) => (
                                     <div key={`${s.linea}-${idx}`} className="salida-item">
@@ -437,7 +533,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                                     </div>
                                 ))
                             ) : (
-                                <span className="parada-sub">Sin horarios disponibles</span>
+                                <span className="parada-sub">Sin horarios disponibles para esta parada</span>
                             )}
                         </div>
 
@@ -456,7 +552,7 @@ export function MapaCercanas({ onSeleccionarDestino, visible = true }: Props) {
                         )}
                     </article>
                 ) : (
-                    <p className="texto-cargando">Sin horarios disponibles</p>
+                    <p className="texto-cargando">Sin horarios disponibles para esta parada</p>
                 )}
             </div>
         </div>
