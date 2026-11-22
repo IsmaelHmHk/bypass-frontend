@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react';
-import { Map, Bookmark, AlertCircle, SlidersHorizontal } from 'lucide-react';
+import { MapPin, Bookmark, AlertCircle, SlidersHorizontal } from 'lucide-react';
 import { apiFetch } from './api/apiClient';
 import type { Linea, ReporteIncidencia } from './types/bypass';
 import { useAuth } from './context/AuthContext';
-import { MapaCercanas, colorLineaOficial } from './components/MapaCercanas';
+import { MapaCercanas } from './components/MapaCercanas';
+import {
+    normalizarColorGtfs,
+    normalizarTextoColorGtfs,
+    leerCatalogoCache,
+    type EstacionCatalogo,
+} from './data/estacionesMadrid';
 import { BuscadorRutas } from './components/BuscadorRutas';
 import { TermometroVagones } from './components/TermometroVagones';
-import { leerCatalogoCache, type EstacionCatalogo } from './data/estacionesMadrid';
 
 type PestanaMovil = 'MAPA' | 'LO_DE_SIEMPRE' | 'AVISOS';
 
@@ -114,7 +119,8 @@ export default function App() {
                             <div className="lineas-selector">
                                 {lineas.map((l) => {
                                     const activa = lineaActiva === l.idLinea;
-                                    const bg = colorLineaOficial(l.codigoCorto);
+                                    const bg = normalizarColorGtfs(l.colorHex);
+                                    const fg = normalizarTextoColorGtfs(undefined, bg);
                                     return (
                                         <button
                                             key={l.idLinea}
@@ -122,7 +128,7 @@ export default function App() {
                                             className="linea-btn"
                                             style={{
                                                 backgroundColor: activa ? bg : '#FAF8F4',
-                                                color: activa ? '#FFFFFF' : '#242424',
+                                                color: activa ? fg : '#242424',
                                                 borderColor: bg,
                                             }}
                                             onClick={() => setLineaActiva(l.idLinea)}
@@ -161,6 +167,7 @@ export default function App() {
                     className={pestana === 'MAPA' ? 'active' : ''}
                     onClick={() => setPestana('MAPA')}
                 >
+                    <MapPin size={17} />
                     <span>Mapa</span>
                 </button>
                 <button
